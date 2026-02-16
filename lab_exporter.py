@@ -8,6 +8,8 @@ and reports snapshots every N seconds.
 
 Usage:
     python lab_exporter.py --server https://lab.example.com
+    python lab_exporter.py --server https://lab.example.com --hostname mynode01
+    python lab_exporter.py --server https://lab.example.com --nogpu
     python lab_exporter.py --server https://lab.example.com --config ./my-config.json
 """
 
@@ -52,7 +54,7 @@ DEFAULT_REPORT_INTERVAL = 5  # seconds
 # ── Hardware Discovery ──────────────────────────────────────
 
 
-def discover_hardware() -> dict:
+def discover_hardware(skip_gpu: bool = False) -> dict:
     """Probe local hardware and return capabilities dict."""
     caps: dict = {}
 
@@ -65,7 +67,7 @@ def discover_hardware() -> dict:
 
     # GPUs
     gpus = []
-    if HAS_NVML:
+    if HAS_NVML and not skip_gpu:
         try:
             pynvml.nvmlInit()
             count = pynvml.nvmlDeviceGetCount()
@@ -142,10 +144,10 @@ def get_primary_ip() -> str:
         return "127.0.0.1"
 
 
-def collect_snapshot(config: dict, capabilities: dict) -> dict:
+def collect_snapshot(config: dict, capabilities: dict, hostname_override: str = None, skip_gpu: bool = False) -> dict:
     """Collect a monitoring snapshot based on the active config."""
 
-    hostname = platform.node()
+    hostname = hostname_override or platform.node()
     ip = get_primary_ip()
 
     # CPU
@@ -173,7 +175,7 @@ def collect_snapshot(config: dict, capabilities: dict) -> dict:
     # GPUs
     gpus = []
     gpu_indices = config.get("gpuIndices")
-    if HAS_NVML:
+    if HAS_NVML and not skip_gpu:
         try:
             pynvml.nvmlInit()
             count = pynvml.nvmlDeviceGetCount()
@@ -368,6 +370,16 @@ def main():
         help="Report interval in seconds (overrides server config)",
     )
     parser.add_argument(
+        "--hostname",
+        default=None,
+        help="Override hostname (default: system FQDN from platform.node())",
+    )
+    parser.add_argument(
+        "--nogpu",
+        action="store_true",
+        help="Disable GPU monitoring (for nodes without NVIDIA GPUs)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -376,6 +388,11 @@ def main():
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.nogpu:
+        log.info("GPU monitoring disabled via --nogpu")
+    if args.hostname:
+        log.info("Using custom hostname: %s", args.hostname)
 
     server_url = args.server.rstrip("/")
     config_path = Path(args.config)
@@ -389,7 +406,7 @@ def main():
 
     # ── Step 1: Discover hardware ───────────────────────────
     log.info("Discovering hardware...")
-    capabilities = discover_hardware()
+    capabilities = discover_hardware(skip_gpu=args.nogpu)
     log.info(
         "Found: %d CPU cores, %.1f GB RAM, %d GPUs, %d disks, %d NICs",
         capabilities["cpuCores"],
@@ -401,7 +418,7 @@ def main():
 
     # ── Step 2: Register (if no token) ──────────────────────
     if not token:
-        hostname = platform.node()
+        hostname = args.hostname or platform.node()
         log.info("No token found, registering as '%s'...", hostname)
         try:
             resp = requests.post(
@@ -483,7 +500,7 @@ def main():
     config_refresh_counter = 0
     while running:
         try:
-            snapshot = collect_snapshot(monitor_config, capabilities)
+            snapshot = collect_snapshot(monitor_config, capabilities, hostname_override=args.hostname, skip_gpu=args.nogpu)
             net_tracker.update(snapshot, monitor_config)
 
             resp = requests.post(

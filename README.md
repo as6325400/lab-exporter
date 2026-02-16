@@ -88,6 +88,8 @@ sudo journalctl -u lab-exporter -f
 | 參數 | 必填 | 說明 |
 |------|------|------|
 | `--server URL` | 是 | Lab Portal 後端網址 |
+| `--hostname NAME` | 否 | 自訂主機名稱（預設：系統 FQDN） |
+| `--nogpu` | 否 | 關閉 GPU 監控（適用於無 NVIDIA GPU 的節點） |
 | `--config PATH` | 否 | config.json 路徑（預設：同目錄下的 config.json） |
 | `--interval N` | 否 | 強制指定回報間隔秒數（覆蓋伺服器設定） |
 | `--debug` | 否 | 啟用 debug 日誌 |
