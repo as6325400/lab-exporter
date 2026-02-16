@@ -516,8 +516,10 @@ def main():
     net_tracker.update(prime_snapshot, monitor_config)
 
     # ── Step 4: Report loop ─────────────────────────────────
-    config_refresh_counter = 0
+    known_config_version = -1  # will be set on first report response
     while running:
+        need_config_refresh = False
+
         try:
             snapshot = collect_snapshot(monitor_config, capabilities, hostname_override=args.hostname, skip_gpu=args.nogpu)
             net_tracker.update(snapshot, monitor_config)
@@ -530,6 +532,16 @@ def main():
             )
             if resp.status_code == 200:
                 log.debug("Report sent OK")
+                # Check configVersion returned by server
+                data = resp.json()
+                server_version = data.get("configVersion", 0)
+                if known_config_version < 0:
+                    # First report — just record the version
+                    known_config_version = server_version
+                elif server_version != known_config_version:
+                    log.info("Config version changed (%d → %d), refreshing config...", known_config_version, server_version)
+                    known_config_version = server_version
+                    need_config_refresh = True
             elif resp.status_code == 401:
                 log.error("Token rejected. Delete %s and re-register.", config_path)
                 sys.exit(1)
@@ -538,10 +550,8 @@ def main():
         except requests.RequestException as e:
             log.warning("Report failed: %s", e)
 
-        # Periodically refresh config (every 60 intervals ≈ 5 min at 5s interval)
-        config_refresh_counter += 1
-        if config_refresh_counter >= 60:
-            config_refresh_counter = 0
+        # Refresh config when server signals a version change
+        if need_config_refresh:
             try:
                 resp = requests.get(
                     f"{server_url}/api/monitoring/config",
