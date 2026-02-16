@@ -154,9 +154,9 @@ def collect_snapshot(config: dict, capabilities: dict, hostname_override: str = 
     cpu_pct = psutil.cpu_percent(interval=None)
     cpu_cores = capabilities.get("cpuCores", psutil.cpu_count(logical=True))
 
-    # Memory
+    # Memory (total - available = actual usage, matches htop)
     mem = psutil.virtual_memory()
-    mem_used_gb = round(mem.used / (1024**3), 1)
+    mem_used_gb = round((mem.total - mem.available) / (1024**3), 1)
     mem_total_gb = round(mem.total / (1024**3), 1)
 
     # Load average
@@ -246,20 +246,29 @@ def collect_snapshot(config: dict, capabilities: dict, hostname_override: str = 
         except PermissionError:
             continue
 
-    # Network
-    nic_names = config.get("nicNames")
-    net_rx_mbps = 0.0
-    net_tx_mbps = 0.0
+    # Network — per-NIC (rate will be filled in by NetworkRateTracker)
+    nic_names_cfg = config.get("nicNames")
+    nics_snapshot = []
     net_counters = psutil.net_io_counters(pernic=True)
+    nic_addrs = psutil.net_if_addrs()
     for nic_name, counters in net_counters.items():
         if nic_name == "lo":
             continue
-        if nic_names is not None and nic_name not in nic_names:
+        if nic_names_cfg is not None and nic_name not in nic_names_cfg:
             continue
-        # Convert bytes to Mbps (approximate — will be delta'd on next tick)
-        # For now, report cumulative bytes — backend doesn't diff, so report rate
-        net_rx_mbps += counters.bytes_recv
-        net_tx_mbps += counters.bytes_sent
+        # Look up IPv4 address for this NIC
+        ipv4 = ""
+        if nic_name in nic_addrs:
+            for addr in nic_addrs[nic_name]:
+                if addr.family == socket.AF_INET:
+                    ipv4 = addr.address
+                    break
+        nics_snapshot.append({
+            "name": nic_name,
+            "ipv4": ipv4,
+            "rxMbps": 0.0,  # placeholder, filled by NetworkRateTracker
+            "txMbps": 0.0,
+        })
 
     snapshot = {
         "hostname": hostname,
@@ -270,8 +279,9 @@ def collect_snapshot(config: dict, capabilities: dict, hostname_override: str = 
         "memoryTotalGB": mem_total_gb,
         "gpus": gpus,
         "disks": disks,
-        "networkRxMbps": round(net_rx_mbps, 1),
-        "networkTxMbps": round(net_tx_mbps, 1),
+        "nics": nics_snapshot,
+        "networkRxMbps": 0.0,  # total, filled by NetworkRateTracker
+        "networkTxMbps": 0.0,
         "uptimeSeconds": uptime_seconds,
         "processCount": process_count,
         "loadAvg": load_avg,
@@ -283,41 +293,49 @@ def collect_snapshot(config: dict, capabilities: dict, hostname_override: str = 
 
 
 class NetworkRateTracker:
-    """Track network bytes and compute Mbps rate between snapshots."""
+    """Track per-NIC network bytes and compute Mbps rate between snapshots."""
 
     def __init__(self):
-        self._prev_rx = 0
-        self._prev_tx = 0
+        # { nic_name: { rx: bytes, tx: bytes } }
+        self._prev: dict[str, dict[str, int]] = {}
         self._prev_time = 0.0
         self._initialized = False
 
     def update(self, snapshot: dict, config: dict):
-        """Replace cumulative byte counts with Mbps rate in the snapshot."""
-        nic_names = config.get("nicNames")
+        """Fill in per-NIC Mbps rates and combined totals in the snapshot."""
+        nic_names_cfg = config.get("nicNames")
         net_counters = psutil.net_io_counters(pernic=True)
-        total_rx = 0
-        total_tx = 0
-        for nic_name, counters in net_counters.items():
-            if nic_name == "lo":
-                continue
-            if nic_names is not None and nic_name not in nic_names:
-                continue
-            total_rx += counters.bytes_recv
-            total_tx += counters.bytes_sent
-
         now = time.time()
-        if self._initialized and (now - self._prev_time) > 0:
-            dt = now - self._prev_time
-            rx_mbps = ((total_rx - self._prev_rx) * 8) / (dt * 1_000_000)
-            tx_mbps = ((total_tx - self._prev_tx) * 8) / (dt * 1_000_000)
-            snapshot["networkRxMbps"] = round(max(rx_mbps, 0), 1)
-            snapshot["networkTxMbps"] = round(max(tx_mbps, 0), 1)
-        else:
-            snapshot["networkRxMbps"] = 0.0
-            snapshot["networkTxMbps"] = 0.0
+        dt = now - self._prev_time if self._initialized and (now - self._prev_time) > 0 else 0
 
-        self._prev_rx = total_rx
-        self._prev_tx = total_tx
+        total_rx = 0.0
+        total_tx = 0.0
+
+        for nic in snapshot.get("nics", []):
+            name = nic["name"]
+            counters = net_counters.get(name)
+            if not counters:
+                continue
+
+            cur_rx = counters.bytes_recv
+            cur_tx = counters.bytes_sent
+
+            if dt > 0 and name in self._prev:
+                rx_mbps = ((cur_rx - self._prev[name]["rx"]) * 8) / (dt * 1_000_000)
+                tx_mbps = ((cur_tx - self._prev[name]["tx"]) * 8) / (dt * 1_000_000)
+                nic["rxMbps"] = round(max(rx_mbps, 0), 1)
+                nic["txMbps"] = round(max(tx_mbps, 0), 1)
+            else:
+                nic["rxMbps"] = 0.0
+                nic["txMbps"] = 0.0
+
+            total_rx += nic["rxMbps"]
+            total_tx += nic["txMbps"]
+
+            self._prev[name] = {"rx": cur_rx, "tx": cur_tx}
+
+        snapshot["networkRxMbps"] = round(total_rx, 1)
+        snapshot["networkTxMbps"] = round(total_tx, 1)
         self._prev_time = now
         self._initialized = True
 
@@ -493,8 +511,9 @@ def main():
     psutil.cpu_percent(interval=None)
 
     net_tracker = NetworkRateTracker()
-    # Prime the network tracker
-    net_tracker.update({"networkRxMbps": 0, "networkTxMbps": 0}, monitor_config)
+    # Prime the network tracker with a real snapshot so _prev byte counters are set
+    prime_snapshot = collect_snapshot(monitor_config, capabilities, hostname_override=args.hostname, skip_gpu=args.nogpu)
+    net_tracker.update(prime_snapshot, monitor_config)
 
     # ── Step 4: Report loop ─────────────────────────────────
     config_refresh_counter = 0

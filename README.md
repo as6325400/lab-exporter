@@ -120,7 +120,49 @@ sudo journalctl -u lab-exporter -f
 ### 可選回報（管理員在後台勾選）
 - **GPU**：使用率、顯存、溫度、功耗（可選擇特定 GPU）
 - **硬碟**：各掛載點使用量 / 總量（可選擇特定掛載點）
-- **網路**：收發速率 Mbps（可選擇特定網卡）
+- **網路**：每張網卡獨立追蹤收發速率 Mbps（可選擇特定網卡），前端可同時查看多張網卡的即時流量與歷史圖表
+
+## 上報資料結構（Snapshot）
+
+每次上報的 JSON 結構如下：
+
+```json
+{
+  "hostname": "gpu-node-1",
+  "ip": "10.0.1.11",
+  "cpuUsagePct": 65.2,
+  "cpuCores": 32,
+  "memoryUsedGB": 83.2,
+  "memoryTotalGB": 128,
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA RTX 4090",
+      "utilizationPct": 75,
+      "memoryUsedMB": 18000,
+      "memoryTotalMB": 24576,
+      "temperatureC": 72,
+      "powerDrawW": 380,
+      "powerLimitW": 450
+    }
+  ],
+  "disks": [
+    { "mount": "/", "totalGB": 500, "usedGB": 180 }
+  ],
+  "nics": [
+    { "name": "eth0", "rxMbps": 120.5, "txMbps": 45.3 },
+    { "name": "eno2", "rxMbps": 0.1, "txMbps": 0.0 }
+  ],
+  "networkRxMbps": 120.6,
+  "networkTxMbps": 45.3,
+  "uptimeSeconds": 1382400,
+  "processCount": 340,
+  "loadAvg": [20.8, 18.7, 17.7]
+}
+```
+
+> `nics` 陣列包含每張被監控網卡的獨立流量數據。`networkRxMbps` / `networkTxMbps` 為所有網卡的加總。
+> 記憶體使用量使用 `total - available` 計算，與 `htop` 顯示一致。
 
 ## 故障排除
 
