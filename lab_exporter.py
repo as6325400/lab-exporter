@@ -94,23 +94,28 @@ def discover_hardware(skip_gpu: bool = False) -> dict:
                 pass
     caps["gpus"] = gpus
 
-    # Disks
-    disks = []
-    for part in psutil.disk_partitions(all=False):
-        # Skip pseudo/snap filesystems
+    # Disks (all=True to include ZFS datasets; deduplicate by device)
+    seen_devices: dict[str, dict] = {}
+    for part in psutil.disk_partitions(all=True):
+        # Only keep real block devices (/dev/...) and ZFS datasets
+        if not (part.device.startswith("/") or part.fstype == "zfs"):
+            continue
         if part.fstype in ("squashfs", "tmpfs", "devtmpfs", "overlay"):
             continue
         try:
             usage = psutil.disk_usage(part.mountpoint)
-            disks.append(
-                {
-                    "mount": part.mountpoint,
-                    "totalGB": round(usage.total / (1024**3), 1),
-                }
-            )
         except PermissionError:
             continue
-    caps["disks"] = disks
+        entry = {
+            "device": part.device,
+            "mount": part.mountpoint,
+            "fstype": part.fstype,
+            "totalGB": round(usage.total / (1024**3), 1),
+        }
+        prev = seen_devices.get(part.device)
+        if prev is None or len(part.mountpoint) < len(prev["mount"]):
+            seen_devices[part.device] = entry
+    caps["disks"] = list(seen_devices.values())
 
     # NICs
     nics = []
@@ -227,25 +232,32 @@ def collect_snapshot(config: dict, capabilities: dict, hostname_override: str = 
             except Exception:
                 pass
 
-    # Disks
+    # Disks (all=True to include ZFS datasets; deduplicate by device)
     disks = []
     disk_mounts = config.get("diskMounts")
-    for part in psutil.disk_partitions(all=False):
+    seen_devices: dict[str, dict] = {}
+    for part in psutil.disk_partitions(all=True):
+        if not (part.device.startswith("/") or part.fstype == "zfs"):
+            continue
         if part.fstype in ("squashfs", "tmpfs", "devtmpfs", "overlay"):
             continue
         if disk_mounts is not None and part.mountpoint not in disk_mounts:
             continue
         try:
             usage = psutil.disk_usage(part.mountpoint)
-            disks.append(
-                {
-                    "mount": part.mountpoint,
-                    "totalGB": round(usage.total / (1024**3), 1),
-                    "usedGB": round(usage.used / (1024**3), 1),
-                }
-            )
         except PermissionError:
             continue
+        entry = {
+            "device": part.device,
+            "mount": part.mountpoint,
+            "fstype": part.fstype,
+            "totalGB": round(usage.total / (1024**3), 1),
+            "usedGB": round(usage.used / (1024**3), 1),
+        }
+        prev = seen_devices.get(part.device)
+        if prev is None or len(part.mountpoint) < len(prev["mount"]):
+            seen_devices[part.device] = entry
+    disks = list(seen_devices.values())
 
     # Network — per-NIC (rate will be filled in by NetworkRateTracker)
     nic_names_cfg = config.get("nicNames")
