@@ -21,6 +21,7 @@ import platform
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -358,17 +359,15 @@ def save_local_config(path: Path, data: dict):
 
 # ── Main ────────────────────────────────────────────────────
 
-running = True
+stop_event = threading.Event()
 
 
 def signal_handler(signum, frame):
-    global running
     log.info("Received signal %d, shutting down...", signum)
-    running = False
+    stop_event.set()
 
 
 def main():
-    global running
 
     parser = argparse.ArgumentParser(description="Lab Exporter — GPU Node Monitoring Agent")
     parser.add_argument(
@@ -473,7 +472,7 @@ def main():
     log.info("Pulling monitoring config from server...")
     monitor_config: dict = {}
     retry_count = 0
-    while running:
+    while not stop_event.is_set():
         try:
             resp = requests.get(
                 f"{server_url}/api/monitoring/config",
@@ -498,9 +497,9 @@ def main():
         retry_count += 1
         if retry_count > 60:
             log.warning("Still waiting for config after %d retries...", retry_count)
-        time.sleep(5)
+        stop_event.wait(5)
 
-    if not running:
+    if stop_event.is_set():
         return
 
     # Determine report interval
@@ -517,7 +516,7 @@ def main():
 
     # ── Step 4: Report loop ─────────────────────────────────
     known_config_version = -1  # will be set on first report response
-    while running:
+    while not stop_event.is_set():
         need_config_refresh = False
 
         try:
@@ -570,7 +569,7 @@ def main():
             except requests.RequestException:
                 pass
 
-        time.sleep(interval)
+        stop_event.wait(interval)
 
     log.info("Exporter stopped.")
 
