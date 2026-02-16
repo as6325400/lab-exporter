@@ -1,0 +1,23 @@
+[Unit]
+Description=Lab Exporter — GPU Node Monitoring Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lab-exporter
+ExecStart=/opt/lab-exporter/venv/bin/python /opt/lab-exporter/lab_exporter.py --server https://lab.example.com
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/lab-exporter
+
+[Install]
+WantedBy=multi-user.target
