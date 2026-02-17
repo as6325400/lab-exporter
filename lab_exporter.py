@@ -404,6 +404,11 @@ def main():
         help="Override hostname (default: system FQDN from platform.node())",
     )
     parser.add_argument(
+        "--secret",
+        default=None,
+        help="Registration secret (must match server setting)",
+    )
+    parser.add_argument(
         "--nogpu",
         action="store_true",
         help="Disable GPU monitoring (for nodes without NVIDIA GPUs)",
@@ -450,9 +455,12 @@ def main():
         hostname = args.hostname or platform.node()
         log.info("No token found, registering as '%s'...", hostname)
         try:
+            reg_body: dict = {"hostname": hostname, "capabilities": capabilities}
+            if args.secret:
+                reg_body["secret"] = args.secret
             resp = requests.post(
                 f"{server_url}/api/monitoring/register",
-                json={"hostname": hostname, "capabilities": capabilities},
+                json=reg_body,
                 timeout=10,
             )
             data = resp.json()

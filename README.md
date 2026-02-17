@@ -42,12 +42,14 @@ sudo ./venv/bin/pip install -r requirements.txt
 ### 3. 首次註冊
 
 ```bash
-sudo ./venv/bin/python lab_exporter.py --server https://your-lab-portal.example.com
+sudo ./venv/bin/python lab_exporter.py --server https://your-lab-portal.example.com --secret YOUR_SECRET
 ```
+
+> 若管理員在系統設定中設定了「監控節點註冊密鑰」，則 `--secret` 為必填，須與後台設定一致。若未設定密鑰則可省略。
 
 首次執行時：
 1. 程式會探索本機硬體（CPU、RAM、GPU、硬碟、網卡）
-2. 向 Lab Portal 後端發送註冊請求
+2. 向 Lab Portal 後端發送註冊請求（附帶 secret 驗證）
 3. 取得 token 並儲存至 `config.json`
 4. 開始等待管理員設定監控項目
 
@@ -61,15 +63,16 @@ sudo ./venv/bin/python lab_exporter.py --server https://your-lab-portal.example.
 4. 勾選要監控的項目
 5. 儲存
 
-設定完成後，exporter 會在下次拉取設定時（約 5 分鐘內）自動套用新設定。
+設定完成後，exporter 會在下一次上報時偵測到版本變更，自動拉取新設定（通常在 5 秒內生效）。
 
 ### 5. 設定 systemd 服務
 
 ```bash
-# 編輯 service 檔案，修改 --server 網址
+# 編輯 service 檔案，修改 --server 網址（首次需加 --secret）
 sudo cp lab-exporter.service /etc/systemd/system/
 sudo vim /etc/systemd/system/lab-exporter.service
 # 修改 ExecStart 中的 --server 為實際的 Lab Portal URL
+# 若後台有設定註冊密鑰，加上 --secret YOUR_SECRET
 
 # 啟用並啟動
 sudo systemctl daemon-reload
@@ -89,6 +92,7 @@ sudo journalctl -u lab-exporter -f
 |------|------|------|
 | `--server URL` | 是 | Lab Portal 後端網址 |
 | `--hostname NAME` | 否 | 自訂主機名稱（預設：系統 FQDN） |
+| `--secret KEY` | 否 | 註冊密鑰（須與後台「監控節點註冊密鑰」一致，若後台未設定則可省略） |
 | `--nogpu` | 否 | 關閉 GPU 監控（適用於無 NVIDIA GPU 的節點） |
 | `--config PATH` | 否 | config.json 路徑（預設：同目錄下的 config.json） |
 | `--interval N` | 否 | 強制指定回報間隔秒數（覆蓋伺服器設定） |
@@ -166,6 +170,13 @@ sudo journalctl -u lab-exporter -f
 
 ## 故障排除
 
+### 「Invalid registration secret」(403)
+
+註冊密鑰不正確。解決方式：
+
+1. 確認 `--secret` 參數值與 Lab Portal 後台「系統設定 → 監控節點註冊密鑰」一致
+2. 若後台已清空密鑰，則不需帶 `--secret`
+
 ### 「Node already registered」
 
 節點已經註冊過。解決方式：
@@ -198,15 +209,20 @@ Token 已失效（可能被管理員重設）。解決方式：
 ## 架構
 
 ```
-節點                            Lab Portal
-┌──────────────┐               ┌──────────────────┐
-│ lab_exporter │──register────→│ POST /register    │
-│              │←──token───────│                   │
-│              │               │                   │
-│              │──get config──→│ GET  /config      │
-│              │←──config──────│                   │
-│              │               │                   │
-│              │──report──────→│ POST /report      │ → in-memory store
-│              │  (every 5s)   │                   │   → frontend polling
-└──────────────┘               └──────────────────┘
+節點                                Lab Portal
+┌──────────────┐                   ┌──────────────────┐
+│ lab_exporter │──register+secret─→│ POST /register    │
+│              │←──token───────────│                   │
+│              │                   │                   │
+│              │──get config──────→│ GET  /config      │
+│              │←──config──────────│                   │
+│              │                   │                   │
+│              │──report──────────→│ POST /report      │ → in-memory store
+│              │←──configVersion───│                   │   → frontend polling
+│              │  (every 5s)       │                   │
+│              │                   │                   │
+│              │  若 configVersion │                   │
+│              │  變更，自動重拉    │                   │
+│              │  GET /config      │                   │
+└──────────────┘                   └──────────────────┘
 ```
